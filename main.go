@@ -1,24 +1,15 @@
 package main
 
 import (
-	"fmt"
+	"log"
+	"net/http"
 
-	"github.com/pion/webrtc/v3"
+	"github.com/lnogueir/stream-anything/wshandles"
 )
 
 func main() {
-	mediaEngine := new(webrtc.MediaEngine)
-	mediaEngine.RegisterDefaultCodecs()
-
-	webrtcAPI := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-		},
-	}
-	webrtcAPI.NewPeerConnection(config)
-	fmt.Println("Hello World")
-
+	http.HandleFunc("/webrtc", wshandles.WebRTCHandle)
+	const addr = "localhost:8080"
+	log.Printf("WebSocket listening at %s", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
