@@ -2,12 +2,12 @@ package wshandles
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"sync"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/lithammer/shortuuid"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -44,19 +44,17 @@ type webrtcMessage struct {
 }
 
 type webrtcHandle struct {
+	baseHandle
 	state    webrtcState
-	wsConn   *websocket.Conn
 	peerConn *webrtc.PeerConnection
-	mutex    sync.Mutex
-	id       string
 }
 
 //WebRTCHandle handles webrtc related requests
 func WebRTCHandle(w http.ResponseWriter, r *http.Request) {
 	var err error
 	handle := webrtcHandle{
-		id:    uuid.NewString(),
-		state: notStarted,
+		baseHandle: baseHandle{id: shortuuid.New()},
+		state:      notStarted,
 	}
 	if handle.wsConn, err = wsUpgrader.Upgrade(w, r, nil); nil != err {
 		log.Println("[webrtc] Error connecting:", err)
@@ -70,73 +68,82 @@ func WebRTCHandle(w http.ResponseWriter, r *http.Request) {
 		if nil != err {
 			if !websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure,
 				websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[webrtc] Terminating handle %s", handle.id)
+				log.Printf("[webrtc=%s] Disconnecting", handle.id)
 				return
 			}
-			errMessage = "[webrtc] Error reading message:"
-			log.Println(errMessage, err)
+			errMessage = fmt.Sprintf("[webrtc=%s] Error reading message: %s", handle.id, err)
+			log.Println(errMessage)
 			continue
 		}
-		log.Printf("[webrtc] Recv message: %s", message)
+		log.Printf("[webrtc=%s] recv: %s", handle.id, message)
 
 		var parsedMessage webrtcMessage
 		if err = json.Unmarshal([]byte(message), &parsedMessage); nil != err {
-			errMessage = "[webrtc] Error parsing message:"
-			log.Println(errMessage, err)
+			errMessage = fmt.Sprintf("[webrtc=%s] Error parsing message: %s", handle.id, err)
+			log.Println(errMessage)
 			continue
 		}
 
-		wrongStateErrMessage := "[webrtc] Called '%s' command in wrong state: %s. State should been: %s"
+		wrongStateErrMessage := "Called '%s' command in wrong state: %s. State should been: %s. Message ignored."
 		switch parsedMessage.Command {
 		case "start":
 			if notStarted != handle.state {
-				log.Printf(wrongStateErrMessage, parsedMessage.Command, handle.state, notStarted)
+				errMessage = fmt.Sprintf(wrongStateErrMessage, parsedMessage.Command, handle.state, notStarted)
+				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+				handle.sendWarning(errMessage)
 				continue
 			}
 
 			if err = handle.initializePeerConnection(); nil != err {
-				errMessage = "[webrtc] Error initializing peer connection:"
-				log.Println(errMessage, err)
+				errMessage = fmt.Sprintf("Error initializing peer connection: %s", err)
 				handle.state = failed
-				continue
+				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+				handle.sendError(errMessage)
+				return
 			}
-			log.Println("[webrtc] Successfully initialized peer connection")
+			log.Printf("[webrtc=%s] Successfully initialized peer connection", handle.id)
 			handle.state = readyToBegin
 			handle.send(webrtcMessage{Command: "ready"})
 
 		case "offer":
 			if readyToBegin != handle.state {
-				log.Printf(wrongStateErrMessage, parsedMessage.Command, handle.state, readyToBegin)
+				errMessage = fmt.Sprintf(wrongStateErrMessage, parsedMessage.Command, handle.state, readyToBegin)
+				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+				handle.sendWarning(errMessage)
 				continue
 			}
 
 			handle.state = signalling
+
 			if err = handle.takeOffer(parsedMessage.Sdp); nil != err {
-				log.Println("[webrtc] Error taking offer:", err)
+				errMessage = fmt.Sprintf("Error taking offer: %s", err)
 				handle.state = failed
-				continue
+				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+				handle.sendError(errMessage)
+				return
 			}
 
 			answer := handle.peerConn.LocalDescription()
-			err = handle.send(webrtcMessage{Command: "answer", Sdp: answer.SDP})
-			if nil != err {
-				log.Println("[webrtc] Error signalling answer:", err)
-				handle.state = failed
-				continue
-			}
+			handle.send(webrtcMessage{Command: "answer", Sdp: answer.SDP})
 
 		case "candidate":
 			if signalling != handle.state {
-				log.Printf(wrongStateErrMessage, parsedMessage.Command, handle.state, signalling)
+				errMessage = fmt.Sprintf(wrongStateErrMessage, parsedMessage.Command, handle.state, signalling)
+				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+				handle.sendWarning(errMessage)
 				continue
 			}
 
 			if err = handle.takeCandidate(parsedMessage.Candidate); nil != err {
-				log.Println("[webrtc] Error taking candidate:", err)
+				errMessage = fmt.Sprintf("Error taking candidate: %s", err)
+				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+				handle.sendWarning(errMessage)
 				continue
 			}
 		default:
-			log.Printf("[webrtc] Received unknown command '%s'. Ignoring...", parsedMessage.Command)
+			errMessage = fmt.Sprintf("Received unknown command '%s'. Ignored.", parsedMessage.Command)
+			log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+			handle.sendWarning(errMessage)
 		}
 	}
 }
@@ -191,15 +198,12 @@ func (handle *webrtcHandle) setupOnIceCandidate() {
 			return
 		}
 
-		if err := handle.send(webrtcMessage{
+		handle.send(webrtcMessage{
 			Command:       "candidate",
 			Candidate:     candidate.ToJSON().Candidate,
 			SDPMid:        *candidate.ToJSON().SDPMid,
 			SDPMLineIndex: candidate.ToJSON().SDPMLineIndex,
-		}); err != nil {
-			log.Println("[webrtc] Error signalling candidate:", err)
-			return
-		}
+		})
 	})
 }
 
@@ -207,11 +211,4 @@ func (handle *webrtcHandle) setupOnTrack() {
 	handle.peerConn.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Println("[webrtc] Received Track!!")
 	})
-}
-
-func (handle *webrtcHandle) send(messageStruct webrtcMessage) error {
-	message, _ := json.Marshal(messageStruct)
-	handle.mutex.Lock()
-	defer handle.mutex.Unlock()
-	return handle.wsConn.WriteMessage(websocket.TextMessage, message)
 }
