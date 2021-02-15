@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Test</title>
+</head>
+<body>
+  <h1>Test WebRTC Stream</h1>
+  <div>
+    <button onclick="startStreaming()">
+      Start
+    </button>
+  </div>
+  <script type="text/javascript" async defer src="https://cdnjs.cloudflare.com/ajax/libs/webrtc-adapter/6.4.0/adapter.min.js"></script>
+  <script>
+    function startStreaming() {
+      var pc;
+      navigator.mediaDevices.getUserMedia({audio: true, video: true})
+      .then((stream) => {
+        const webSocket = new WebSocket("ws://localhost:8080/webrtc")
+        webSocket.onopen = function () {
+          pc = new RTCPeerConnection({iceServers: [{urls: 'stun:stun.l.google.com:19302'}]})
+          pc.onnegotiationneeded = async () => {
+            try {
+              await pc.setLocalDescription(await pc.createOffer());
+              // Send the offer to the other peer.
+              webSocket.send(JSON.stringify({cmd: "offer", sdp: pc.localDescription.sdp}));
+            } catch (err) {
+              console.error(err);
+            }
+          };
+          pc.onicecandidate = ({candidate}) => {
+            if (candidate != null){
+              webSocket.send(JSON.stringify({cmd:"candidate", candidate: candidate.candidate}))
+            }
+          }
+          webSocket.send(JSON.stringify({cmd: "start"}));
+        }
+        webSocket.onmessage = async function (msg) {
+          const parsed = JSON.parse(msg.data);
+          switch (parsed.cmd) {
+            case 'ready':
+              stream.getTracks().forEach((track) => pc.addTrack(track))
+              break;
+            case 'answer':
+              var desc = new RTCSessionDescription({type: 'answer', sdp: parsed.sdp})
+              await pc.setRemoteDescription(desc)
+              break;
+            case 'candidate':
+              var cand = new RTCIceCandidate({candidate: parsed.candidate, sdpMid: parsed.sdpMid, sdpMLineIndex: parsed.sdpMLineIndex})
+              await pc.addIceCandidate(cand)
+              break;
+          }
+        }
+      })
+    }
+
+  </script>
+
+</body>
+</html>
