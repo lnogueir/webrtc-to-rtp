@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 
 	"github.com/gorilla/websocket"
 	"github.com/lithammer/shortuuid"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -209,6 +211,59 @@ func (handle *webrtcHandle) setupOnIceCandidate() {
 
 func (handle *webrtcHandle) setupOnTrack() {
 	handle.peerConn.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Println("[webrtc] Received Track!!")
+		log.Printf("[webrtc=%s] Received %s track", handle.id, track.Kind())
+		var err error
+		var udpConn *net.UDPConn
+		var raddr *net.UDPAddr
+		var payloadType uint8
+		switch track.Kind() {
+		case webrtc.RTPCodecTypeAudio:
+			payloadType = 111
+			raddr, err = net.ResolveUDPAddr("udp", "127.0.0.1:4000")
+			if nil != err {
+				log.Printf("[webrtc=%s] net.ResolveUDPAddr returned error: %s", handle.id, err)
+			}
+		case webrtc.RTPCodecTypeVideo:
+			payloadType = 96
+			raddr, err = net.ResolveUDPAddr("udp", "127.0.0.1:4002")
+			if nil != err {
+				log.Printf("[webrtc=%s] net.ResolveUDPAddr returned error: %s", handle.id, err)
+			}
+		}
+		laddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:")
+		udpConn, err = net.DialUDP("udp", laddr, raddr)
+		if nil != err {
+			log.Printf("[webrtc=%s] net.DialUDP returned error: %s", handle.id, err)
+		}
+
+		packetBytes := make([]byte, 1500)
+		rtpPacket := &rtp.Packet{}
+		for {
+			// Read
+			n, _, err := track.Read(packetBytes)
+			if nil != err {
+				log.Printf("[webrtc=%s] track.Read returned error: %s", handle.id, err)
+			}
+
+			// Unmarshal the packet and update the PayloadType
+			if err = rtpPacket.Unmarshal(packetBytes[:n]); nil != err {
+				log.Printf("[webrtc=%s] rtpPacket.Unmarshal returned error: %s", handle.id, err)
+			}
+			rtpPacket.PayloadType = payloadType
+
+			// Marshal into original buffer with updated PayloadType
+			if n, err = rtpPacket.MarshalTo(packetBytes); err != nil {
+				log.Printf("[webrtc=%s] rtpPacket.MarshalTo returned error: %s", handle.id, err)
+			}
+
+			// Write
+			if _, err = udpConn.Write(packetBytes[:n]); err != nil {
+				if opError, ok := err.(*net.OpError); ok && opError.Err.Error() == "write: connection refused" {
+					continue
+				}
+				log.Printf("[webrtc=%s] udpConn.Write returned error: %s", handle.id, err)
+			}
+			// log.Printf("[webrtc=%s] Sent %d bytes RTP packet", handle.id, n)
+		}
 	})
 }
