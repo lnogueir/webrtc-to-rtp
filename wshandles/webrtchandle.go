@@ -86,7 +86,7 @@ func WebRTCHandle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		wrongStateErrMessage := "Called '%s' command in wrong state: %s. State should been: %s. Message ignored."
+		wrongStateErrMessage := "Called '%s' command in wrong state: %s. State should be: %s. Message ignored."
 		switch parsedMessage.Command {
 		case "start":
 			if notStarted != handle.state {
