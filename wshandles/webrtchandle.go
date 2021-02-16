@@ -98,13 +98,17 @@ func WebRTCHandle(w http.ResponseWriter, r *http.Request) {
 
 			if err = handle.initializePeerConnection(); nil != err {
 				errMessage = fmt.Sprintf("Error initializing peer connection: %s", err)
+				handle.mutex.Lock()
 				handle.state = failed
+				handle.mutex.Unlock()
 				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
 				handle.sendError(errMessage)
 				return
 			}
 			log.Printf("[webrtc=%s] Successfully initialized peer connection", handle.id)
+			handle.mutex.Lock()
 			handle.state = readyToBegin
+			handle.mutex.Unlock()
 			handle.send(webrtcMessage{Command: "ready"})
 
 		case "offer":
@@ -115,17 +119,22 @@ func WebRTCHandle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			handle.mutex.Lock()
 			handle.state = signalling
+			handle.mutex.Unlock()
 
 			if err = handle.takeOffer(parsedMessage.Sdp); nil != err {
 				errMessage = fmt.Sprintf("Error taking offer: %s", err)
+				handle.mutex.Lock()
 				handle.state = failed
+				handle.mutex.Unlock()
 				log.Printf("[webrtc=%s] %s", handle.id, errMessage)
 				handle.sendError(errMessage)
 				return
 			}
 
 			answer := handle.peerConn.LocalDescription()
+			log.Println(answer.SDP)
 			handle.send(webrtcMessage{Command: "answer", Sdp: answer.SDP})
 
 		case "candidate":
@@ -167,6 +176,7 @@ func (handle *webrtcHandle) initializePeerConnection() error {
 		}
 	}
 
+	handle.setupOnConnectionStateChange()
 	handle.setupOnIceCandidate()
 	handle.setupOnTrack()
 	return nil
@@ -209,10 +219,32 @@ func (handle *webrtcHandle) setupOnIceCandidate() {
 	})
 }
 
+func (handle *webrtcHandle) setupOnConnectionStateChange() {
+	handle.peerConn.OnConnectionStateChange(func(pcState webrtc.PeerConnectionState) {
+		switch pcState {
+		case webrtc.PeerConnectionStateConnected:
+			handle.mutex.Lock()
+			handle.state = streaming
+			handle.mutex.Unlock()
+			// here I have to figure out how to generate SDP for UDP stream and send it through ws
+		case webrtc.PeerConnectionStateFailed:
+			handle.mutex.Lock()
+			handle.state = failed
+			handle.mutex.Unlock()
+			fallthrough
+		case webrtc.PeerConnectionStateClosed:
+			fallthrough
+		case webrtc.PeerConnectionStateDisconnected:
+			// Here I should handle when user connection gets diconnected
+		}
+	})
+}
+
 func (handle *webrtcHandle) setupOnTrack() {
 	handle.peerConn.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("[webrtc=%s] Received %s track", handle.id, track.Kind())
 		var err error
+		var errMessage string
 		var udpConn *net.UDPConn
 		var raddr *net.UDPAddr
 		var payloadType uint8
@@ -233,7 +265,10 @@ func (handle *webrtcHandle) setupOnTrack() {
 		laddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:")
 		udpConn, err = net.DialUDP("udp", laddr, raddr)
 		if nil != err {
-			log.Printf("[webrtc=%s] net.DialUDP returned error: %s", handle.id, err)
+			errMessage = fmt.Sprintf("Error creating UDP connection: %s", err)
+			log.Printf("[webrtc=%s] %s", handle.id, errMessage)
+			handle.sendError(errMessage)
+			return
 		}
 
 		packetBytes := make([]byte, 1500)
